@@ -15,7 +15,7 @@ def get_link_prediction_args(is_evaluation: bool = False):
                         choices=['wikipedia', 'reddit', 'mooc', 'lastfm', 'myket', 'enron', 'SocialEvo', 'uci', 'Flights', 'CanParl', 'USLegis', 'UNtrade', 'UNvote', 'Contacts'])
     parser.add_argument('--batch_size', type=int, default=200, help='batch size')
     parser.add_argument('--model_name', type=str, default='DyGFormer', help='name of the model, note that EdgeBank is only applicable for evaluation',
-                        choices=['JODIE', 'DyRep', 'TGAT', 'TGN', 'CAWN', 'EdgeBank', 'TCL', 'GraphMixer', 'DyGFormer'])
+                        choices=['JODIE', 'DyRep', 'TGAT', 'TGN', 'CAWN', 'EdgeBank', 'TCL', 'GraphMixer', 'DyGFormer','Liquid','CNEN'])
     parser.add_argument('--gpu', type=int, default=0, help='number of gpu to use')
     parser.add_argument('--num_neighbors', type=int, default=20, help='number of neighbors to sample for each node')
     parser.add_argument('--sample_neighbor_strategy', type=str, default='recent', choices=['uniform', 'recent', 'time_interval_aware'], help='how to sample historical neighbors')
@@ -28,6 +28,8 @@ def get_link_prediction_args(is_evaluation: bool = False):
     parser.add_argument('--walk_length', type=int, default=1, help='length of each random walk')
     parser.add_argument('--time_gap', type=int, default=2000, help='time gap for neighbors to compute node features')
     parser.add_argument('--time_feat_dim', type=int, default=100, help='dimension of the time embedding')
+    parser.add_argument('--structure_feat_dim', type=int, default=50, help='dimension of the structure embedding')
+    parser.add_argument('--lamda', type=float, default=0.2, help='cosine similarity weight for structure embedding loss')
     parser.add_argument('--position_feat_dim', type=int, default=172, help='dimension of the position embedding')
     parser.add_argument('--edge_bank_memory_mode', type=str, default='unlimited_memory', help='how memory of EdgeBank works',
                         choices=['unlimited_memory', 'time_window_memory', 'repeat_threshold_memory'])
@@ -37,7 +39,7 @@ def get_link_prediction_args(is_evaluation: bool = False):
     parser.add_argument('--channel_embedding_dim', type=int, default=50, help='dimension of each channel embedding')
     parser.add_argument('--max_input_sequence_length', type=int, default=32, help='maximal length of the input sequence of each node')
     parser.add_argument('--learning_rate', type=float, default=0.0001, help='learning rate')
-    parser.add_argument('--dropout', type=float, default=0.1, help='dropout rate')
+    parser.add_argument('--dropout', type=float, default=0.2, help='dropout rate')
     parser.add_argument('--num_epochs', type=int, default=100, help='number of epochs')
     parser.add_argument('--optimizer', type=str, default='Adam', choices=['SGD', 'Adam', 'RMSprop'], help='name of optimizer')
     parser.add_argument('--weight_decay', type=float, default=0.0, help='weight decay')
@@ -49,6 +51,10 @@ def get_link_prediction_args(is_evaluation: bool = False):
     parser.add_argument('--negative_sample_strategy', type=str, default='random', choices=['random', 'historical', 'inductive'],
                         help='strategy for the negative edge sampling')
     parser.add_argument('--load_best_configs', action='store_true', default=False, help='whether to load the best configurations')
+    parser.add_argument('--memory_dim', type=int, default=200, help='dimension for neighbor hashtable')
+    parser.add_argument('--update_neighbor', action='store_true', default=True, help='whether to update neighbor hashtable')
+    parser.add_argument('--fusion method', type=str, default='IB', help='how to fusion features',
+                            choices=['IB', 'concat','add'])
 
     try:
         args = parser.parse_args()
@@ -246,7 +252,7 @@ def get_node_classification_args():
     parser.add_argument('--dataset_name', type=str, help='dataset to be used', default='wikipedia', choices=['wikipedia', 'reddit'])
     parser.add_argument('--batch_size', type=int, default=200, help='batch size')
     parser.add_argument('--model_name', type=str, default='DyGFormer', help='name of the model',
-                        choices=['JODIE', 'DyRep', 'TGAT', 'TGN', 'CAWN', 'TCL', 'GraphMixer', 'DyGFormer'])
+                        choices=['JODIE', 'DyRep', 'TGAT', 'TGN', 'CAWN', 'TCL', 'GraphMixer', 'DyGFormer','Liquid','CNEN'])
     parser.add_argument('--gpu', type=int, default=0, help='number of gpu to use')
     parser.add_argument('--num_neighbors', type=int, default=20, help='number of neighbors to sample for each node')
     parser.add_argument('--sample_neighbor_strategy', type=str, default='recent', choices=['uniform', 'recent', 'time_interval_aware'], help='how to sample historical neighbors')
