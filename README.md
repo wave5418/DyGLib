@@ -1,6 +1,6 @@
 # SALoM: Structure Aware Temporal Graph Networks with Long-Short Memory Updater
 This is the code repository of paper **SALoM**: Structure Aware Temporal Graph Networks with Long-Short Memory Updater, built on [DyGLib](https://github.com/yule-BUAA/DyGLib).
-## How to use
+## Data preprocess
 As we built our work upon DyGLib, most of the used original dynamic graph datasets come from [Towards Better Evaluation for Dynamic Link Prediction](https://openreview.net/forum?id=1GVpwr2Tfdg), 
 which can be downloaded [here](https://zenodo.org/record/7213796#.Y1cO6y8r30o). 
 Please download them and put them in ```DG_data``` folder. 
