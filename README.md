@@ -20,7 +20,7 @@ python preprocess_all_data.py
 ## Executing Scripts
 
 ### Scripts for Dynamic Link Prediction
-Dynamic link prediction could be performed on all the thirteen datasets. 
+Dynamic link prediction could be performed on all thirteen datasets. 
 If you want to load the best model configurations determined by the grid search, please set the *load_best_configs* argument to True.
 #### Model Training
 * Example of training *SALoM* on *USLegis* dataset:
