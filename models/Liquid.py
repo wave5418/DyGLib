@@ -3,10 +3,11 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import defaultdict
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+import time
 
 from utils.utils import NeighborSampler
-from utils.NSA import NSAMultiHeadAttention
-from models.modules import TimeEncoder, MergeLayer, MultiHeadAttention,MLPBasedAggregation
+from models.modules import TimeEncoder, MergeLayer, MultiHeadAttention
 
 from .moe import MoE
 from .ccffcc import cfcbundle
@@ -51,6 +52,7 @@ class Liquid(torch.nn.Module):
         self.dst_node_mean_time_shift_dst = dst_node_mean_time_shift_dst
         self.dst_node_std_time_shift = dst_node_std_time_shift
         self.structure_feat_dim = 5
+        # self.structure_feat_dim = 3
         self.max_input_sequence_length = max_input_sequence_length
         self.structure_memory_dim = 64
 
@@ -60,6 +62,8 @@ class Liquid(torch.nn.Module):
         self.memory_dim = self.node_feat_dim
         # since models use the identity function for message encoding, message dimension is 2 * memory_dim + time_feat_dim + edge_feat_dim
         self.message_dim = self.memory_dim + self.memory_dim + self.time_feat_dim + self.edge_feat_dim
+
+        
 
         self.time_encoder = TimeEncoder(time_dim=time_feat_dim)
 
@@ -128,6 +132,13 @@ class Liquid(torch.nn.Module):
         elif fusion_method=='add':
             self.mixer=addadd()
 
+        self.position_feat_dim = 172
+        self.walk_length = 2
+
+        # self.position_encoder = PositionEncoder(position_feat_dim=self.position_feat_dim, walk_length=self.walk_length, device=device)
+
+        # self.walk_encoder = BiLSTMEncoder(input_dim=self.position_feat_dim, hidden_dim=self.position_feat_dim)
+
     def compute_src_dst_node_temporal_embeddings(self, src_node_ids: np.ndarray, dst_node_ids: np.ndarray, node_interact_times: np.ndarray,
                                                  edge_ids: np.ndarray, edges_are_positive: bool = True, num_neighbors: int = 20):
         """
@@ -150,13 +161,20 @@ class Liquid(torch.nn.Module):
         # updated_node_memories, Tensor, shape (num_nodes, memory_dim)
         # updated_node_last_updated_times, Tensor, shape (num_nodes, )
 
+        uptime = 0
 
-        updated_node_memories, updated_node_last_updated_times,exl = self.get_updated_memories(node_ids=np.array(range(self.num_nodes)),
+        tup1 = time.time()
+
+        updated_node_memories, updated_node_last_updated_times,exl,t1,t2,t3 = self.get_updated_memories(node_ids=np.array(range(self.num_nodes)),
                                                                                            node_raw_messages=self.memory_bank.node_raw_messages)
+        # updated_node_memories, updated_node_last_updated_times,exl = self.get_updated_memories(node_ids=np.array(range(self.num_nodes)),
+        # #                                                                                    node_raw_messages=self.memory_bank.node_raw_messages)
         # updated_node_memories, updated_node_last_updated_times = self.get_updated_memories(node_ids=np.array(range(self.num_nodes)),
         #                                                                                    node_raw_messages=self.memory_bank.node_raw_messages)
 
+        tup2 = time.time()
 
+        uptime += tup2 - tup1
 
         # compute the node temporal embeddings using the embedding module
 
@@ -169,26 +187,54 @@ class Liquid(torch.nn.Module):
                                                                                     num_neighbors=num_neighbors)
         # two Tensors, with shape (batch_size, node_feat_dim)
         src_node_embeddings, dst_node_embeddings = node_embeddings[:len(src_node_ids)], node_embeddings[len(src_node_ids): len(src_node_ids) + len(dst_node_ids)]
-
-        # src_node_embeddings = self.proj(src_node_embeddings)
-        # dst_node_embeddings = self.proj(dst_node_embeddings)
-
+        # gongxainlinjv
         src_structure_embedding,dst_structure_embedding=self.compute_coocurrence(src_node_ids, dst_node_ids, node_interact_times,positive=edges_are_positive)
+        # #randomwalks
+        # src_node_multi_hop_graphs = self.neighbor_sampler.get_multi_hop_neighbors(num_hops=self.walk_length, node_ids=src_node_ids,
+        #                                                                           node_interact_times=node_interact_times, num_neighbors=num_neighbors)
+        # # tuple, each element in the tuple is a list of self.walk_length ndarrays, each with shape (batch_size, num_neighbors ** current_hop)
+        # dst_node_multi_hop_graphs = self.neighbor_sampler.get_multi_hop_neighbors(num_hops=self.walk_length, node_ids=dst_node_ids,
+        #                                                                           node_interact_times=node_interact_times, num_neighbors=num_neighbors)
 
-        # src_node_embeddings = self.memory_bank.get_memories(src_node_ids)
-        # dst_node_embeddings = self.memory_bank.get_memories(dst_node_ids)
+        # count the appearances appearances of nodes in the multi-hop graphs that are generated by random walks that
+        # start from src node in src_node_ids and dst node in dst_node_ids
+        # self.position_encoder.count_nodes_appearances(src_node_ids=src_node_ids, dst_node_ids=dst_node_ids,
+        #                                               node_interact_times=node_interact_times,
+        #                                               src_node_multi_hop_graphs=src_node_multi_hop_graphs,
+        #                                               dst_node_multi_hop_graphs=dst_node_multi_hop_graphs)
+
+        # src_structure_embedding = self.compute_node_temporal_embeddings(node_ids=src_node_ids, node_interact_times=node_interact_times,
+        #                                                             node_multi_hop_graphs=src_node_multi_hop_graphs, num_neighbors=num_neighbors)
+        # # Tensor, shape (batch_size, node_feat_dim)
+        # dst_structure_embedding = self.compute_node_temporal_embeddings(node_ids=dst_node_ids, node_interact_times=node_interact_times,
+        #                                                             node_multi_hop_graphs=dst_node_multi_hop_graphs, num_neighbors=num_neighbors)
+
 
         if exl is None:
             exl=0
+            t1,t2,t3 = 0,0,0
 
         if edges_are_positive:
             assert edge_ids is not None
             # if the edges are positive, update the memories for source and destination nodes (since now we have new messages for them)
-            ext=self.update_memories(node_ids=node_ids, node_raw_messages=self.memory_bank.node_raw_messages)
+
+            upt3 = time.time()
+
+            ext,tt1,tt2,tt3 = self.update_memories(node_ids=node_ids, node_raw_messages=self.memory_bank.node_raw_messages)
+            # ext = self.update_memories(node_ids=node_ids, node_raw_messages=self.memory_bank.node_raw_messages)
             # self.update_memories(node_ids=node_ids, node_raw_messages=self.memory_bank.node_raw_messages)
+
+            upt4 = time.time()
             if ext is None:
                 ext=0
+                tt1,tt2,tt3 = 0,0,0
+
+            uptime += upt4 - upt3
+
             exl=exl+ext
+            t1+=tt1
+            t2+=tt2
+            t3+=tt3
 
             # clear raw messages for source and destination nodes since we have already updated the memory using them
             self.memory_bank.clear_node_raw_messages(node_ids=node_ids)
@@ -226,12 +272,12 @@ class Liquid(torch.nn.Module):
 
         exloss=exloss1+exloss2+exl
         # exloss=exloss1+exloss2
-        # exloss=0
+
+        # exloss=exl
 
         # src_embeddings=src_node_embeddings
         # dst_embeddings=dst_node_embeddings
 
-        # exloss=exl
 
         # src_node_embeddings = self.projection(torch.cat([src_node_embeddings,src_structure_embedding],dim=-1))
         # dst_node_embeddings = self.projection(torch.cat([dst_node_embeddings,dst_structure_embedding],dim=-1))
@@ -242,6 +288,42 @@ class Liquid(torch.nn.Module):
         # exloss=0
 
         return src_embeddings, dst_embeddings, exloss
+    
+    def compute_node_temporal_embeddings(self, node_ids: np.ndarray, node_interact_times: np.ndarray, node_multi_hop_graphs: tuple, num_neighbors: int = 20):
+        """
+        given node interaction time node_interact_times and node multi-hop graphs node_multi_hop_graphs,
+        return the temporal embeddings of nodes
+        :param node_interact_times: ndarray, shape (batch_size, )
+        :param node_multi_hop_graphs: tuple of three ndarrays, each array with shape (batch_size, num_neighbors ** self.walk_length, self.walk_length + 1)
+        :return:
+        """
+        # three ndarrays, each array with shape (batch_size, num_neighbors ** self.walk_length, self.walk_length + 1)
+        nodes_neighbor_ids, nodes_edge_ids, nodes_neighbor_times = \
+            self.convert_format_from_tree_to_array(node_ids=node_ids, node_interact_times=node_interact_times,
+                                                   node_multi_hop_graphs=node_multi_hop_graphs, num_neighbors=num_neighbors)
+
+        # ndarray, shape (batch_size, num_neighbors ** self.walk_length), record the valid length of each walk
+        walks_valid_lengths = (nodes_neighbor_ids != 0).sum(axis=-1)
+
+        # get time features of nodes in the multi-hop graphs
+        # check that the time of start node in each walk should be identical to the node in the batch
+        assert (nodes_neighbor_times[:, :, 0] == node_interact_times.repeat(repeats=num_neighbors ** self.walk_length, axis=0).
+                reshape(len(node_interact_times), num_neighbors ** self.walk_length)).all()
+
+        # get edge features of nodes in the multi-hop graphs
+        # ndarray, shape (batch_size, num_neighbors ** self.walk_length, self.walk_length + 1)
+        # check that the edge ids of the target node is denoted by zeros
+        assert (nodes_edge_ids[:, :, 0] == 0).all()
+
+
+        # get position features of nodes in the multi-hop graphs
+        # Tensor, shape (batch_size, num_neighbors ** self.walk_length, self.walk_length + 1, position_feat_dim)
+        neighbor_position_features = self.position_encoder(nodes_neighbor_ids=nodes_neighbor_ids)
+
+        # encode the random walks by walk encoder
+        # Tensor, shape (batch_size, self.output_dim)
+        final_node_embeddings = self.walk_encoder(inputs=neighbor_position_features, lengths=walks_valid_lengths).mean(dim = -2)
+        return final_node_embeddings
 
     def pad_sequences(self, node_ids: np.ndarray, node_interact_times: np.ndarray, nodes_neighbor_ids_list: list, nodes_edge_ids_list: list,
                         nodes_neighbor_times_list: list, patch_size: int = 1, max_input_sequence_length: int = 256):
@@ -277,8 +359,8 @@ class Liquid(torch.nn.Module):
 
             # pad the sequences
             # three ndarrays with shape (batch_size, max_seq_length)
-            padded_nodes_neighbor_ids = np.zeros((len(node_ids), max_seq_length)).astype(np.long)
-            padded_nodes_edge_ids = np.zeros((len(node_ids), max_seq_length)).astype(np.long)
+            padded_nodes_neighbor_ids = np.zeros((len(node_ids), max_seq_length)).astype(np.int32)
+            padded_nodes_edge_ids = np.zeros((len(node_ids), max_seq_length)).astype(np.int32)
             padded_nodes_neighbor_times = np.zeros((len(node_ids), max_seq_length)).astype(np.float32)
 
             for idx in range(len(node_ids)):
@@ -352,6 +434,10 @@ class Liquid(torch.nn.Module):
         
         src_padded_nodes_neighbor_structure_features = torch.cat([pos_feature_src_src, pos_feature_src_dst, pos_feature_src_src_short, pos_feature_src_dst_short, src_coocur], dim=-1)
         dst_padded_nodes_neighbor_structure_features = torch.cat([pos_feature_dst_dst, pos_feature_dst_src, pos_feature_dst_dst_short, pos_feature_dst_src_short, dst_coocur], dim=-1)
+
+        
+        # src_padded_nodes_neighbor_structure_features = torch.cat([pos_feature_src_src, pos_feature_src_dst, src_coocur], dim=-1)
+        # dst_padded_nodes_neighbor_structure_features = torch.cat([pos_feature_dst_dst, pos_feature_dst_src, dst_coocur], dim=-1)
 
         src_padded_nodes_neighbor_structure_features = self.structure_encoder(src_padded_nodes_neighbor_structure_features).mean(dim=1)
         dst_padded_nodes_neighbor_structure_features = self.structure_encoder(dst_padded_nodes_neighbor_structure_features).mean(dim=1)
@@ -470,17 +556,17 @@ class Liquid(torch.nn.Module):
         # get updated memory for all nodes with messages stored in previous batches (just for computation)
         # updated_node_memories, Tensor, shape (num_nodes, memory_dim)
         # updated_node_last_updated_times, Tensor, shape (num_nodes, )
+        updated_node_memories, updated_node_last_updated_times,exl,t1,t2,t3 = self.memory_updater.get_updated_memories(unique_node_ids=unique_node_ids,
+                                                                                                          unique_node_messages=unique_node_messages,
+                                                                                                          unique_node_timestamps=unique_node_timestamps)
         # updated_node_memories, updated_node_last_updated_times,exl = self.memory_updater.get_updated_memories(unique_node_ids=unique_node_ids,
-        #                                                                                                   unique_node_messages=unique_node_messages,
-        #                                                                                                   unique_node_timestamps=unique_node_timestamps)
-        updated_node_memories, updated_node_last_updated_times,exl = self.memory_updater.get_updated_memories(unique_node_ids=unique_node_ids,
-                                                                                                    unique_node_messages=unique_node_messages,
-                                                                                                    unique_node_timestamps=unique_node_timestamps)
+        #                                                                                             unique_node_messages=unique_node_messages,
+        #                                                                                             unique_node_timestamps=unique_node_timestamps)
         # updated_node_memories, updated_node_last_updated_times = self.memory_updater.get_updated_memories(unique_node_ids=unique_node_ids,
         #                                                                                     unique_node_messages=unique_node_messages,
         #                                                                                     unique_node_timestamps=unique_node_timestamps)
 
-        return updated_node_memories, updated_node_last_updated_times,exl
+        return updated_node_memories, updated_node_last_updated_times,exl,t1,t2,t3
 
     def update_memories(self, node_ids: np.ndarray, node_raw_messages: dict):
         """
@@ -496,14 +582,21 @@ class Liquid(torch.nn.Module):
         # unique_node_timestamps, ndarray, shape (num_unique_node_ids, ), array of timestamps for unique nodes
         unique_node_ids, unique_node_messages, unique_node_timestamps = self.message_aggregator.aggregate_messages(node_ids=node_ids,
                                                                                                                    node_raw_messages=node_raw_messages)
-
+        exl,t1,t2,t3 = 0,0,0,0
         # update the memories with the aggregated messages
-        exl=self.memory_updater.update_memories(unique_node_ids=unique_node_ids, unique_node_messages=unique_node_messages,
+        try:
+            exl,t1,t2,t3 = self.memory_updater.update_memories(unique_node_ids=unique_node_ids, unique_node_messages=unique_node_messages,
                                             unique_node_timestamps=unique_node_timestamps)
+        except:
+            # exl = self.memory_updater.update_memories(unique_node_ids=unique_node_ids, unique_node_messages=unique_node_messages,
+            #                                 unique_node_timestamps=unique_node_timestamps)
+            self.memory_updater.update_memories(unique_node_ids=unique_node_ids, unique_node_messages=unique_node_messages,
+                                    unique_node_timestamps=unique_node_timestamps)
+            
         # self.memory_updater.update_memories(unique_node_ids=unique_node_ids, unique_node_messages=unique_node_messages,
         #                             unique_node_timestamps=unique_node_timestamps)
 
-        return exl
+        return exl,t1,t2,t3
 
     def compute_new_node_raw_messages(self, src_node_ids: np.ndarray, dst_node_ids: np.ndarray, dst_node_embeddings: torch.Tensor,
                                       node_interact_times: np.ndarray, edge_ids: np.ndarray):
@@ -559,6 +652,41 @@ class Liquid(torch.nn.Module):
             assert self.embedding_module.neighbor_sampler.seed is not None
             self.embedding_module.neighbor_sampler.reset_random_state()
             self.neighbor_sampler.reset_random_state()
+    def convert_format_from_tree_to_array(self, node_ids: np.ndarray, node_interact_times: np.ndarray, node_multi_hop_graphs: tuple, num_neighbors: int = 20):
+        """
+        convert the multi-hop graphs from tree-like data format to aligned array-like format
+        :param node_ids: ndarray, shape (batch_size, )
+        :param node_interact_times: ndarray, shape (batch_size, )
+        :param node_multi_hop_graphs: tuple, each element in the tuple is a list of self.walk_length ndarrays, each with shape (batch_size, num_neighbors ** current_hop)
+        :param num_neighbors: int, number of neighbors to sample for each node
+        :return:
+        """
+        # tuple, each element in the tuple is a list of self.walk_length ndarrays, each with shape (batch_size, num_neighbors ** current_hop)
+        nodes_neighbor_ids, nodes_edge_ids, nodes_neighbor_times = node_multi_hop_graphs
+
+        # add the target node to the list to generate random walks in array-like format
+        nodes_neighbor_ids = [node_ids[:, np.newaxis]] + nodes_neighbor_ids
+        # follow the CAWN official implementation, the edge ids of the target node is denoted by zeros
+        nodes_edge_ids = [np.zeros((len(node_ids), 1)).astype(np.longlong)] + nodes_edge_ids
+        nodes_neighbor_times = [node_interact_times[:, np.newaxis]] + nodes_neighbor_times
+
+        array_format_data_list = []
+        for tree_format_data in [nodes_neighbor_ids, nodes_edge_ids, nodes_neighbor_times]:
+            # num_last_hop_neighbors equals to num_neighbors ** self.walk_length
+            batch_size, num_last_hop_neighbors, walk_length_plus_1, dtype = \
+                tree_format_data[0].shape[0], tree_format_data[-1].shape[-1], len(tree_format_data), tree_format_data[0].dtype
+            assert batch_size == len(node_ids) and num_last_hop_neighbors == num_neighbors ** self.walk_length and walk_length_plus_1 == self.walk_length + 1
+            # record the information of random walks with num_last_hop_neighbors paths, where each path has length walk_length_plus_1 (include the target node)
+            # ndarray, shape (batch_size, num_last_hop_neighbors, walk_length_plus_1)
+            array_format_data = np.empty((batch_size, num_last_hop_neighbors, walk_length_plus_1), dtype=dtype)
+            for hop_idx, hop_data in enumerate(tree_format_data):
+                assert (num_last_hop_neighbors % hop_data.shape[-1] == 0)
+                # pad the data at each hop to be the same shape with the last hop data (which has the most number of neighbors)
+                # repeat the traversed nodes in tree_format_data to get the aligned array-like format
+                array_format_data[:, :, hop_idx] = np.repeat(hop_data, repeats=num_last_hop_neighbors // hop_data.shape[-1], axis=1)
+            array_format_data_list.append(array_format_data)
+        # three ndarrays with shape (batch_size, num_neighbors ** self.walk_length, self.walk_length + 1)
+        return array_format_data_list[0], array_format_data_list[1], array_format_data_list[2]
 
 
 # Message-related Modules
@@ -614,9 +742,11 @@ class MemoryBank(nn.Module):
 
         # Parameter, treat memory as parameters so that it is saved and loaded together with the model, shape (num_nodes, memory_dim)
         self.node_memories = nn.Parameter(torch.zeros((self.num_nodes, self.memory_dim)), requires_grad=False)
+
         self.struc_memories = nn.Parameter(torch.zeros((self.num_nodes, self.stru_memory_dim+self.stru_memory_dim//4), dtype=torch.long), requires_grad=False)
         # Parameter, last updated time of nodes, shape (num_nodes, )
         self.node_last_updated_times = nn.Parameter(torch.zeros(self.num_nodes), requires_grad=False)
+
         # dictionary of list, {node_id: list of tuples}, each tuple is (message, time) with type (Tensor shape (message_dim, ), a scalar)
         self.node_raw_messages = defaultdict(list)
 
@@ -631,6 +761,13 @@ class MemoryBank(nn.Module):
         self.struc_memories.data.zero_()
         self.node_last_updated_times.data.zero_()
         self.node_raw_messages = defaultdict(list)
+
+    def get_num_nodes(self):
+        """
+        get all node ids in the memory bank
+        :return: ndarray, shape (num_nodes, ), array of node ids
+        """
+        return self.num_nodes
 
     def get_memories(self, node_ids: np.ndarray):
         """
@@ -648,6 +785,7 @@ class MemoryBank(nn.Module):
         :return:
         """
         self.node_memories[torch.from_numpy(node_ids)] = updated_node_memories
+
 
     def backup_memory_bank(self):
         """
@@ -716,6 +854,7 @@ class MemoryBank(nn.Module):
         """
         return self.node_last_updated_times[torch.from_numpy(unique_node_ids)]
 
+
     def extra_repr(self):
         """
         set the extra representation of the module, print customized extra information
@@ -779,23 +918,46 @@ class MemoryUpdater(nn.Module):
         """
         # if unique_node_ids is empty, return without updating operations
         if len(unique_node_ids) <= 0:
-            return
+            return 0, 0, 0, 0
 
         assert (self.memory_bank.get_node_last_updated_times(unique_node_ids) <=
                 torch.from_numpy(unique_node_timestamps).float().to(unique_node_messages.device)).all().item(), "Trying to update memory to time in the past!"
 
-        # Tensor, shape (num_unique_node_ids, memory_dim)
+        exl,t1,t2,t3 = 0 ,0 ,0 ,0
+
         node_memories = self.memory_bank.get_memories(node_ids=unique_node_ids)
-        # Tensor, shape (num_unique_node_ids, memory_dim)
-        updated_node_memories,exl = self.memory_updater(unique_node_messages, node_memories)
-        # updated_node_memories = self.memory_updater(unique_node_messages, node_memories)
-        # update memories for nodes in unique_node_ids
+
+        updated_node_memories,exl,t1,t2,t3 = self.memory_updater(unique_node_messages, node_memories)
+
         self.memory_bank.set_memories(node_ids=unique_node_ids, updated_node_memories=updated_node_memories)
 
-        # update last updated times for nodes in unique_node_ids
         self.memory_bank.node_last_updated_times[torch.from_numpy(unique_node_ids)] = torch.from_numpy(unique_node_timestamps).float().to(unique_node_messages.device)
 
-        return exl
+        return exl,t1,t2,t3
+
+
+
+        # secure_node_memorys = self.memory_bank.get_substitute_memories(secure_nodes)[0]
+        # equal_node_memorys = self.memory_bank.get_substitute_memories(equal_nodes)[1]
+
+
+
+        # # Tensor, shape (num_unique_node_ids, memory_dim)
+        # node_memories = self.memory_bank.get_memories(node_ids=unique_node_ids)
+        # # Tensor, shape (num_unique_node_ids, memory_dim)
+        # updated_node_memories,exl,t1,t2,t3 = self.memory_updater(unique_node_messages, node_memories)
+
+        # last_updated_times = self.memory_bank.get_node_last_updated_times(unique_node_ids=unique_node_ids)
+        
+        
+        # updated_node_memories = self.memory_updater(unique_node_messages, node_memories)
+        # # update memories for nodes in unique_node_ids
+        # self.memory_bank.set_memories(node_ids=unique_node_ids, updated_node_memories=updated_node_memories)
+
+        # # update last updated times for nodes in unique_node_ids
+        # self.memory_bank.node_last_updated_times[torch.from_numpy(unique_node_ids)] = torch.from_numpy(unique_node_timestamps).float().to(unique_node_messages.device)
+
+        # return exl, t1, t2, t3
 
     def get_updated_memories(self, unique_node_ids: np.ndarray, unique_node_messages: torch.Tensor,
                              unique_node_timestamps: np.ndarray):
@@ -809,29 +971,22 @@ class MemoryUpdater(nn.Module):
         """
         # if unique_node_ids is empty, directly return node_memories and node_last_updated_times without updating
         if len(unique_node_ids) <= 0:
-            return self.memory_bank.node_memories.data.clone(), self.memory_bank.node_last_updated_times.data.clone(),0
+            return self.memory_bank.node_memories.data.clone(), self.memory_bank.node_last_updated_times.data.clone(), 0, 0, 0, 0
 
         assert (self.memory_bank.get_node_last_updated_times(unique_node_ids=unique_node_ids) <=
                 torch.from_numpy(unique_node_timestamps).float().to(unique_node_messages.device)).all().item(), "Trying to update memory to time in the past!"
 
-        # Tensor, shape (num_nodes, memory_dim)
         updated_node_memories = self.memory_bank.node_memories.data.clone()
-        # updated_node_memories[torch.from_numpy(unique_node_ids)],exl = self.memory_updater(unique_node_messages,
-        #                                                                                updated_node_memories[torch.from_numpy(unique_node_ids)])
-        updated_node_memories[torch.from_numpy(unique_node_ids)],exl = self.memory_updater(unique_node_messages,
-                                                                                updated_node_memories[torch.from_numpy(unique_node_ids)])
-        # updated_node_memories[torch.from_numpy(unique_node_ids)] = self.memory_updater(unique_node_messages,
-        #                                                                 updated_node_memories[torch.from_numpy(unique_node_ids)])
-        # Tensor, shape (num_nodes, )
+
+        updated_node_memories[torch.from_numpy(unique_node_ids)],exl,t1,t2,t3 = self.memory_updater(unique_node_messages,updated_node_memories[torch.from_numpy(unique_node_ids)])
+
         updated_node_last_updated_times = self.memory_bank.node_last_updated_times.data.clone()
         updated_node_last_updated_times[torch.from_numpy(unique_node_ids)] = torch.from_numpy(unique_node_timestamps).float().to(unique_node_messages.device)
 
-        # if exl is None:
-        #     exl=0
+        if exl is None:
+            exl=0
 
-        # return updated_node_memories, updated_node_last_updated_times,exl
-        return updated_node_memories, updated_node_last_updated_times,exl
-
+        return updated_node_memories, updated_node_last_updated_times,exl,t1,t2,t3
 
 
 class GRUMemoryUpdater(MemoryUpdater):
@@ -885,7 +1040,80 @@ class SalimMemoryUpdater(MemoryUpdater):
         """
         super(SalimMemoryUpdater, self).__init__(memory_bank)
 
-        self.memory_updater = MoE(message_dim, memory_dim, 6, memory_dim, k=2, noisy_gating=True)
+        print(message_dim,memory_dim)
+
+        self.memory_updater = MoE(message_dim, memory_dim, 8, memory_dim, k=3, noisy_gating=True)
+
+class catcell(nn.Module):
+
+    def __init__(self, message_dim: int, memory_dim: int):
+        """
+        CatCell, a simple linear layer for memory update.
+        :param input_dim: int, dimension of input
+        :param hidden_dim: int, dimension of hidden state
+        """
+        super(catcell, self).__init__()
+
+        self.moecell = cfcbundle(message_dim, memory_dim)
+        self.grucell = nn.GRUCell(input_size=message_dim, hidden_size=memory_dim)
+        self.merge = nn.Linear(memory_dim+memory_dim,memory_dim)
+
+    def forward(self, x,hx):
+        """
+        forward function
+        :param x: Tensor, shape (batch_size, input_dim)
+        :return: Tensor, shape (batch_size, hidden_dim)
+        """
+        out1 = self.moecell(x,hx)
+        out2 = self.grucell(x,hx)
+        return self.merge(torch.cat([out1,out2],dim=1)),0
+class votecell(nn.Module):
+
+    def __init__(self, message_dim: int, memory_dim: int):
+        """
+        VoteCell, a simple linear layer for memory update.
+        :param input_dim: int, dimension of input
+        :param hidden_dim: int, dimension of hidden state
+        """
+        super(votecell, self).__init__()
+
+        self.moecell = cfcbundle(message_dim, memory_dim)
+        self.grucell = nn.GRUCell(input_size=message_dim, hidden_size=memory_dim)
+
+    def forward(self, x,hx):
+        """
+        forward function
+        :param x: Tensor, shape (batch_size, input_dim)
+        :return: Tensor, shape (batch_size, hidden_dim)
+        """
+        out1 = self.moecell(x,hx)
+        out2 = self.grucell(x,hx)
+        return 0.5*out1+0.5*out2,0
+
+class catMemoryUpdater(MemoryUpdater):
+
+    def __init__(self, memory_bank: MemoryBank, message_dim: int, memory_dim: int):
+        """
+        GRU-based memory updater.
+        :param memory_bank: MemoryBank
+        :param message_dim: int, dimension of node messages
+        :param memory_dim: int, dimension of node memories
+        """
+        super(catMemoryUpdater, self).__init__(memory_bank)
+
+        self.memory_updater = catcell(message_dim, memory_dim)
+class VoteMemoryUpdater(MemoryUpdater):
+
+    def __init__(self, memory_bank: MemoryBank, message_dim: int, memory_dim: int):
+        """
+        GRU-based memory updater.
+        :param memory_bank: MemoryBank
+        :param message_dim: int, dimension of node messages
+        :param memory_dim: int, dimension of node memories
+        """
+        super(VoteMemoryUpdater, self).__init__(memory_bank)
+
+        self.memory_updater = votecell(message_dim, memory_dim)
 
 
 # Embedding-related Modules
@@ -1163,3 +1391,161 @@ class addadd(nn.Module):
         super(addadd,self).__init__()
     def forward(self,x1,x2):
         return x1+x2
+    
+class PositionEncoder(nn.Module):
+
+    def __init__(self, position_feat_dim: int, walk_length: int, device: str = 'cpu'):
+        """
+        Position encoder that computes each node position features.
+        :param position_feat_dim: int, dimension of position features (encodings)
+        :param walk_length: int, length of each random walk
+        :param device: str, device
+        """
+        super(PositionEncoder, self).__init__()
+        self.position_feat_dim = position_feat_dim
+        self.walk_length = walk_length
+        self.device = device
+
+        # two-layered feed forward network with ReLU activation
+        self.position_encode_layer = nn.Sequential(nn.Linear(in_features=self.walk_length + 1, out_features=self.position_feat_dim),
+                                                   nn.ReLU(),
+                                                   nn.Linear(in_features=self.position_feat_dim, out_features=self.position_feat_dim))
+
+    def count_nodes_appearances(self, src_node_ids: np.ndarray, dst_node_ids: np.ndarray, node_interact_times: np.ndarray,
+                                src_node_multi_hop_graphs: tuple, dst_node_multi_hop_graphs: tuple):
+        """
+        count the appearances of nodes in the multi-hop graphs that are generated by random walks starting from src and dst nodes
+        :param src_node_ids: ndarray, shape (batch_size, )
+        :param dst_node_ids:: ndarray, shape (batch_size, )
+        :param node_interact_times: ndarray, shape (batch_size, )
+        :param src_node_multi_hop_graphs: tuple, each element in the tuple is a list of self.walk_length ndarrays, each with shape (batch_size, num_neighbors ** current_hop)
+        :param dst_node_multi_hop_graphs: tuple, each element in the tuple is a list of self.walk_length ndarrays, each with shape (batch_size, num_neighbors ** current_hop)
+        :return:
+        """
+        # use node id and interaction timestamp to identify a node in the multi-hop graph
+        # src_nodes_neighbor_ids and src_nodes_neighbor_times are lists, each list contains self.walk_length ndarrays, each with shape (batch_size, num_neighbors ** current_hop)
+        src_nodes_neighbor_ids, _, src_nodes_neighbor_times = src_node_multi_hop_graphs
+        # dst_nodes_neighbor_ids and dst_nodes_neighbor_times are lists, each list contains self.walk_length ndarrays, each with shape (batch_size, num_neighbors ** current_hop)
+        dst_nodes_neighbor_ids, _, dst_nodes_neighbor_times = dst_node_multi_hop_graphs
+
+        # dictionary, {node_identity (key): ndarray with shape (2, self.walk_length + 1) (value)}
+        # store the appearances of all the nodes in the multi-hop graphs that are generated by random walks starting from src and dst nodes
+        self.nodes_appearances = {}
+        # get the multi-hop information for each node
+        for idx, (src_node_id, dst_node_id, node_interact_time) in enumerate(zip(src_node_ids, dst_node_ids, node_interact_times)):
+            # src_node_neighbor_ids, list of ndarrays, each ndarray with shape (num_neighbors ** current_hop)
+            src_node_neighbor_ids = [src_nodes_single_hop_neighbor_ids[idx] for src_nodes_single_hop_neighbor_ids in src_nodes_neighbor_ids]
+            src_node_neighbor_times = [src_nodes_single_hop_neighbor_times[idx] for src_nodes_single_hop_neighbor_times in src_nodes_neighbor_times]
+            dst_node_neighbor_ids = [dst_nodes_single_hop_neighbor_ids[idx] for dst_nodes_single_hop_neighbor_ids in dst_nodes_neighbor_ids]
+            dst_node_neighbor_times = [dst_nodes_single_hop_neighbor_times[idx] for dst_nodes_single_hop_neighbor_times in dst_nodes_neighbor_times]
+
+            # dictionary, {node_identity (key): ndarray with shape (2, self.walk_length + 1) (value)}
+            # store the appearances of nodes in the multi-hop graphs that are generated by random walks starting from src_node_id and dst_node_id
+            tmp_nodes_appearances = {}
+            # add the information of src_node and dst_node to the lists
+            src_node_neighbor_ids, src_node_neighbor_times = [[src_node_id]] + src_node_neighbor_ids, [[node_interact_time]] + src_node_neighbor_times
+            dst_node_neighbor_ids, dst_node_neighbor_times = [[dst_node_id]] + dst_node_neighbor_ids, [[node_interact_time]] + dst_node_neighbor_times
+            for current_hop in range(self.walk_length + 1):
+                for src_node_neighbor_id, src_node_neighbor_time, dst_node_neighbor_id, dst_node_neighbor_time in \
+                        zip(src_node_neighbor_ids[current_hop], src_node_neighbor_times[current_hop], dst_node_neighbor_ids[current_hop], dst_node_neighbor_times[current_hop]):
+
+                    # follow the CAWN official implementation, use the batch index and node id to represent the node key
+                    src_node_key = '-'.join([str(idx), str(src_node_neighbor_id)])
+                    dst_node_key = '-'.join([str(idx), str(dst_node_neighbor_id)])
+
+                    if src_node_key not in tmp_nodes_appearances:
+                        # create a ndarray with shape (2, self.walk_length + 1) for the src node to record its appearances
+                        tmp_nodes_appearances[src_node_key] = np.zeros((2, self.walk_length + 1), dtype=np.float32)
+                    if dst_node_key not in tmp_nodes_appearances:
+                        # create a ndarray with shape (2, self.walk_length + 1) for the dst node to record its appearances
+                        tmp_nodes_appearances[dst_node_key] = np.zeros((2, self.walk_length + 1), dtype=np.float32)
+
+                    # count the appearances of each node in the multi-hop graphs that are generated by random walks starting from src_node_id and dst_node_id
+                    # for each node, tmp_nodes_appearances[node_key][0, :] records the node appearances in the random walks starting from src_node_id
+                    # while tmp_nodes_appearances[node_key][1, :] records the node appearances in the random walks starting from dst_node_id
+                    # number of neighbors at the current hop
+                    num_current_hop_neighbors = len(src_node_neighbor_ids[current_hop])
+                    # convert into landing probabilities by normalizing with k hop sampling number
+                    tmp_nodes_appearances[src_node_key][0, current_hop] += 1 / num_current_hop_neighbors
+                    tmp_nodes_appearances[dst_node_key][1, current_hop] += 1 / num_current_hop_neighbors
+            # set the appearances of the padded node (with zero index) to zeros
+            tmp_nodes_appearances['-'.join([str(idx), str(0)])] = np.zeros((2, self.walk_length + 1), dtype=np.float32)
+            self.nodes_appearances.update(tmp_nodes_appearances)
+
+    def forward(self, nodes_neighbor_ids: np.ndarray):
+        """
+        compute the position features of nodes in nodes_neighbor_ids
+        :param nodes_neighbor_ids: ndarray, shape shape (batch_size, num_neighbors ** self.walk_length, self.walk_length + 1)
+        :return:
+        return Torch.tensor: position features of shape [batch, k-hop-support-number, position_dim]
+        """
+        # batch_indices -> array([[[0, ..., 0,], ..., [0, ..., 0,]], [[1, ..., 1], ..., [1, ..., 1]] ..., [[batch - 1, ..., batch - 1], ..., [batch - 1, ..., batch - 1]]])
+        batch_indices = np.arange(nodes_neighbor_ids.shape[0]).repeat(nodes_neighbor_ids.shape[1] * nodes_neighbor_ids.shape[2]).reshape(nodes_neighbor_ids.shape)
+
+        # list of string keys, shape (batch_size * (num_neighbors ** self.walk_length) * (self.walk_length + 1))
+        batch_keys = ['-'.join([str(batch_indices[i][j][k]), str(nodes_neighbor_ids[i][j][k])])
+                      for i in range(batch_indices.shape[0]) for j in range(batch_indices.shape[1]) for k in range(batch_indices.shape[2])]
+
+        # unique_keys, ndarray, shape (num_unique_keys, )
+        # inverse_indices, ndarray, shape (batch_size * (num_neighbors ** self.walk_length) * (self.walk_length + 1))
+        # we can use unique_keys[inverse_indices] to reconstruct the original input
+        unique_keys, inverse_indices = np.unique(batch_keys, return_inverse=True)
+        # self.nodes_appearances, dictionary, {node_identity (key): ndarray with shape (2, self.walk_length + 1) (value)}
+        # unique_node_appearances, ndarray, shape (num_unique_keys, 2, self.walk_length + 1)
+        unique_node_appearances = np.array([self.nodes_appearances[unique_key] for unique_key in unique_keys])
+        # the appearances of nodes in nodes_neighbor_ids, ndarray, shape (batch_size, num_neighbors ** self.walk_length, self.walk_length + 1, 2, self.walk_length + 1)
+        node_appearances = unique_node_appearances[inverse_indices, :].reshape(nodes_neighbor_ids.shape[0], nodes_neighbor_ids.shape[1],
+                                                                               nodes_neighbor_ids.shape[2], 2, self.walk_length + 1)
+
+        # encode the node appearances in the random walks by MLPs
+        # Tensor, shape (batch_size, num_neighbors ** self.walk_length, self.walk_length + 1, 2, position_feat_dim)
+        position_features = self.position_encode_layer(torch.Tensor(node_appearances).float().to(self.device))
+        # add the position features of each node in random walks generated by src and dst nodes by summing over the second last dimension, Equation (6) in CAWN paper
+        # Tensor, shape (batch_size, num_neighbors ** self.walk_length, self.walk_length + 1, position_feat_dim)
+        position_features = position_features.sum(dim=-2)
+        return position_features
+
+class BiLSTMEncoder(nn.Module):
+
+    def __init__(self, input_dim: int, hidden_dim: int):
+        """
+        BiLSTM encoder.
+        :param input_dim: int, dimension of the input
+        :param hidden_dim: int, dimension of the hidden state
+        """
+        super(BiLSTMEncoder, self).__init__()
+        self.hidden_dim_one_direction = hidden_dim // 2
+        self.model_dim = self.hidden_dim_one_direction * 2
+        self.bilstm_encoder = nn.LSTM(input_size=input_dim, hidden_size=self.hidden_dim_one_direction, batch_first=True, bidirectional=True)
+
+    def forward(self, inputs: torch.Tensor, lengths: np.ndarray):
+        """
+        encode the inputs by BiLSTM encoder based on lengths
+        :param inputs: Tensor, shape (batch_size, num_neighbors ** self.walk_length, self.walk_length + 1, input_dim)
+        :param lengths: ndarray, shape (batch_size, num_neighbors ** self.walk_length), record the valid length of each walk
+        :return:
+        """
+        # Tensor, shape (batch_size * (num_neighbors ** self.walk_length), self.walk_length + 1, input_dim), which corresponds to the LSTM input (batch_size, seq_len, input_dim)
+        inputs = inputs.reshape(inputs.shape[0] * inputs.shape[1], inputs.shape[2], inputs.shape[3])
+        # a PackedSequence object, pack the padded sequence for efficient computation and avoid the errors of computing padded value, set enforce_sorted to False
+        inputs = pack_padded_sequence(inputs, lengths.flatten(), batch_first=True, enforce_sorted=False)
+        # the outputs of LSTM are output, (h_n, c_n), and we only use the output and do not use hidden states
+        encoded_features, _ = self.bilstm_encoder(inputs)
+        # encoded_features, Tensor, shape (batch_size * (num_neighbors ** self.walk_length), self.walk_length + 1, self.model_dim), pad the packed sequence
+        # seq_lengths, Tensor, shape (batch_size * (num_neighbors ** self.walk_length), )
+        encoded_features, seq_lengths = pad_packed_sequence(encoded_features, batch_first=True)
+        assert (seq_lengths.numpy() == lengths.flatten()).all()
+        # Tensor, shape (batch_size * (num_neighbors ** self.walk_length), ), the shifted sequence lengths
+        shifted_seq_lengths = seq_lengths + torch.tensor([i * encoded_features.shape[1] for i in range(encoded_features.shape[0])])
+        # Tensor, shape (batch_size * (num_neighbors ** self.walk_length) * (self.walk_length + 1), self.model_dim)
+        encoded_features = encoded_features.reshape(encoded_features.shape[0] * encoded_features.shape[1], encoded_features.shape[2])
+        # Tensor, shape (batch_size, num_neighbors ** self.walk_length, self.model_dim), get the encodings of each walk at the last position
+        # note that we need to use shifted_seq_lengths - 1 to get the shifted indices
+        encoded_features = encoded_features[shifted_seq_lengths - 1].reshape(lengths.shape[0], lengths.shape[1], self.model_dim)
+
+        return encoded_features
+
+# class leakchecker(nn.Module):
+#     def __init__(self, device='cpu'):
+#         super(leakchecker, self).__init__()
+        
